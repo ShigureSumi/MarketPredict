@@ -44,7 +44,7 @@ export default function Navbar() {
     <nav className="border-b border-white/10 bg-black/50 backdrop-blur-xl sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2 font-black text-2xl tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-600">
-          <Zap className="text-blue-500 fill-blue-500" /> POLYCLONE
+          <Zap className="text-blue-500 fill-blue-500" /> OCTAGON
         </Link>
 
         <div className="flex items-center gap-4">
