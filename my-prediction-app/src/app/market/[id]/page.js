@@ -1,19 +1,19 @@
 // src/app/market/[id]/page.js
 "use client";
-// 1. 引入 use
 import { useEffect, useState, use } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { AlertTriangle, CheckCircle, Lock, Clock } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Lock, Clock, Trash2, Gavel, Scale } from 'lucide-react';
 import Navbar from '@/components/Navbar';
 import SuccessCheck from '@/components/SuccessCheck';
+import { useRouter } from 'next/navigation';
 
 const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
 export default function MarketDetail({ params }) {
-  // 2. 关键修改：使用 use(params) 来获取 ID，否则 Next.js 15 会报错或读不到
   const unwrappedParams = use(params);
   const id = unwrappedParams.id;
+  const router = useRouter();
 
   const [market, setMarket] = useState(null);
   const [user, setUser] = useState(null);
@@ -23,12 +23,12 @@ export default function MarketDetail({ params }) {
   const [showConfirm, setShowConfirm] = useState(false);
   const [betSuccess, setBetSuccess] = useState(false);
   const [timeLeft, setTimeLeft] = useState('');
-  const [loading, setLoading] = useState(true); // 新增 loading 状态显示
+  const [userBets, setUserBets] = useState([]); // 用户在该市场的下注记录
+  const [evidence, setEvidence] = useState(''); // 管理员输入的证据
 
   useEffect(() => {
     if (id) {
       fetchMarketData();
-      // 倒计时
       const timer = setInterval(() => {
         if(market?.end_time) calculateTimeLeft(market.end_time);
       }, 1000);
@@ -38,30 +38,11 @@ export default function MarketDetail({ params }) {
 
   useEffect(() => {
     getUser();
-  }, []);
+  }, [id]);
 
   async function fetchMarketData() {
-    try {
-      // 检查 ID 是否存在
-      if (!id) return;
-
-      const { data, error } = await supabase
-        .from('markets')
-        .select(`*, options(*)`)
-        .eq('id', id)
-        .single();
-      
-      if (error) {
-        console.error("数据库错误:", error);
-        alert("找不到该预测，可能已被删除或权限不足");
-      } else {
-        setMarket(data);
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
+    const { data } = await supabase.from('markets').select(`*, options(*)`).eq('id', id).single();
+    setMarket(data);
   }
 
   async function getUser() {
@@ -70,15 +51,16 @@ export default function MarketDetail({ params }) {
       setUser(session.user);
       const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
       setProfile(data);
+      
+      // 获取用户在这个市场的下注历史（用于判断是否已经买过）
+      const { data: bets } = await supabase.from('bets').select('*').eq('market_id', id).eq('user_id', session.user.id);
+      setUserBets(bets || []);
     }
   }
 
   function calculateTimeLeft(endTime) {
     const diff = new Date(endTime) - new Date();
-    if (diff <= 0) {
-      setTimeLeft("已截止");
-      return;
-    }
+    if (diff <= 0) { setTimeLeft("已截止"); return; }
     const days = Math.floor(diff / (1000 * 60 * 60 * 24));
     const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
     const minutes = Math.floor((diff / 1000 / 60) % 60);
@@ -86,11 +68,8 @@ export default function MarketDetail({ params }) {
   }
 
   const chartData = [
-    { time: '00:00', prob: 20 },
-    { time: '06:00', prob: 35 },
-    { time: '12:00', prob: 45 },
-    { time: '18:00', prob: 42 },
-    { time: 'Current', prob: market && market.options && market.options.length > 0 ? calculateProb(market.options[0]) : 50 },
+    { time: 'Start', prob: 50 },
+    { time: 'Now', prob: market && market.options && market.options.length > 0 ? calculateProb(market.options[0]) : 50 },
   ];
 
   function calculateProb(option) {
@@ -100,28 +79,32 @@ export default function MarketDetail({ params }) {
     return Math.round((option.pool_amount / total) * 100);
   }
 
+  // --- 核心逻辑更新：下注 ---
   const handlePlaceBet = async () => {
     if (!selectedOption || !betAmount) return;
     
+    // 1. 基础检查
     if (Number(betAmount) < 50) return alert("最低下注 50 币");
     if (Number(betAmount) > (profile?.balance || 0)) return alert("余额不足");
     if (new Date() > new Date(market.end_time)) return alert("已截止");
 
+    // 2.【新功能】单边下注检查
+    // 如果用户已经下过注，且这次选的选项跟上次不一样，则报错
+    const hasBetOtherSide = userBets.some(bet => bet.option_id !== selectedOption.id);
+    if (hasBetOtherSide) {
+      alert("规则限制：你只能押注其中一方！不能两头下注。");
+      setShowConfirm(false);
+      return;
+    }
+
+    // 3. 执行下注
     await supabase.from('profiles').update({ balance: profile.balance - betAmount }).eq('id', user.id);
     await supabase.from('options').update({ pool_amount: Number(selectedOption.pool_amount) + Number(betAmount) }).eq('id', selectedOption.id);
-    
     await supabase.from('bets').insert({
-      user_id: user.id,
-      market_id: market.id,
-      option_id: selectedOption.id,
-      amount: betAmount
+      user_id: user.id, market_id: market.id, option_id: selectedOption.id, amount: betAmount
     });
-
     await supabase.from('transactions').insert({
-      user_id: user.id,
-      amount: -betAmount,
-      type: 'BET',
-      description: `下注: ${market.question.substring(0, 10)}...`
+      user_id: user.id, amount: -betAmount, type: 'BET', description: `下注: ${market.question}`
     });
 
     setBetSuccess(true);
@@ -132,85 +115,107 @@ export default function MarketDetail({ params }) {
     }, 2000);
   };
 
-  // 优化加载状态显示
-  if (loading) return (
-    <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white">
-      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
-      <p className="text-slate-400">正在加载预测数据...</p>
-      <p className="text-xs text-slate-600 mt-2">如果长时间不动，请检查 Supabase RLS 权限</p>
-    </div>
-  );
+  // --- 管理员功能 ---
+  const handleDeleteMarket = async () => {
+    if(!confirm("确定要删除这个市场吗？此操作无法恢复！")) return;
+    await supabase.from('markets').delete().eq('id', id);
+    alert("删除成功");
+    router.push('/');
+  };
 
-  if (!market) return (
-    <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">
-      未找到该市场数据 (ID: {id})
-    </div>
-  );
+  const handleResolveMarket = async (optionId) => {
+    if(!evidence) return alert("裁决必须提供证据说明！");
+    if(!confirm("确定裁决并派奖？")) return;
+    
+    const { error } = await supabase.rpc('resolve_market_and_payout', {
+      p_market_id: market.id,
+      p_winner_option_id: optionId,
+      p_evidence: evidence
+    });
+
+    if (error) alert("裁决失败: " + error.message);
+    else {
+      alert("裁决完成");
+      window.location.reload();
+    }
+  };
+
+  if (!market) return <div className="min-h-screen bg-slate-950 text-white flex justify-center items-center">Loading...</div>;
 
   const totalVol = market.options ? market.options.reduce((acc, o) => acc + Number(o.pool_amount), 0) : 0;
   const isClosed = new Date() > new Date(market.end_time) || market.status !== 'OPEN';
+  const myTotalBet = userBets.reduce((acc, b) => acc + Number(b.amount), 0);
+  const mySide = userBets.length > 0 ? market.options.find(o => o.id === userBets[0].option_id)?.name : null;
 
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <Navbar />
-      
       <main className="max-w-4xl mx-auto px-4 py-8">
-        <div className="mb-8">
+        {/* 顶部状态栏 */}
+        <div className="mb-8 relative">
+          {/* 管理员删除按钮 */}
+          {profile?.is_admin && (
+            <button onClick={handleDeleteMarket} className="absolute top-0 right-0 p-2 text-red-500 hover:bg-red-900/20 rounded-lg">
+              <Trash2 size={20}/>
+            </button>
+          )}
+
           <div className="flex items-center gap-3 mb-4">
-            {isClosed ? <span className="bg-red-500/20 text-red-400 px-3 py-1 rounded text-xs font-bold flex items-center gap-1"><Lock size={12}/> 已截止</span> 
+            {isClosed ? <span className="bg-red-500/20 text-red-400 px-3 py-1 rounded text-xs font-bold flex items-center gap-1"><Lock size={12}/> {market.status === 'RESOLVED' ? '已结算' : '等待裁决'}</span> 
             : <span className="bg-green-500/20 text-green-400 px-3 py-1 rounded text-xs font-bold flex items-center gap-1"><Clock size={12}/> {timeLeft}</span>}
-            <span className="text-slate-500 text-sm">总量: ${totalVol.toFixed(0)}</span>
+            <span className="text-slate-500 text-sm">池子: ${totalVol.toFixed(0)}</span>
           </div>
+
           <h1 className="text-3xl font-black mb-4">{market.question}</h1>
-          <p className="text-slate-400 text-sm p-4 bg-slate-900 rounded-xl border border-white/5 leading-relaxed">
-            {market.description || "暂无详细说明..."}
-          </p>
+          <p className="text-slate-400 text-sm p-4 bg-slate-900 rounded-xl border border-white/5">{market.description}</p>
           
+          {/* 证据显示 */}
           {market.status === 'RESOLVED' && (
             <div className="mt-4 p-4 bg-blue-900/20 border border-blue-500/30 rounded-xl">
               <h3 className="text-blue-400 font-bold mb-1 flex items-center gap-2"><CheckCircle size={16}/> 裁决证据</h3>
-              <p className="text-sm text-slate-300">{market.evidence || "根据官方公告裁决。"}</p>
+              <p className="text-sm text-slate-300">{market.evidence}</p>
+            </div>
+          )}
+
+          {/* 个人下注提示 */}
+          {mySide && (
+            <div className="mt-4 flex items-center gap-2 text-yellow-400 bg-yellow-400/10 p-3 rounded-lg border border-yellow-400/20">
+              <AlertTriangle size={16}/>
+              <span className="text-sm font-bold">你已下注 [{mySide}] 共 ${myTotalBet}，根据规则你无法押注另一方。</span>
             </div>
           )}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+          {/* 左侧图表 */}
           <div className="md:col-span-2 bg-slate-900/50 rounded-2xl p-6 border border-white/5">
-            <h3 className="text-sm font-bold text-slate-500 mb-4 uppercase">赔率走势</h3>
-            <div className="h-64 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData}>
-                  <XAxis dataKey="time" stroke="#475569" fontSize={12} />
-                  <YAxis stroke="#475569" fontSize={12} unit="%" />
-                  <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155' }} />
-                  <Line type="monotone" dataKey="prob" stroke="#3b82f6" strokeWidth={3} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+            <h3 className="text-sm font-bold text-slate-500 mb-4 uppercase">概率走势</h3>
+            <div className="h-64 w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={chartData}><XAxis dataKey="time"/><YAxis/><Line type="monotone" dataKey="prob" stroke="#3b82f6" dot={false}/></LineChart></ResponsiveContainer></div>
           </div>
 
+          {/* 右侧交易面板 */}
           <div className="bg-slate-900 border border-white/10 rounded-2xl p-6 sticky top-24 h-fit">
-            <h3 className="font-bold mb-4">进行预测</h3>
+            <h3 className="font-bold mb-4">选择方向</h3>
             <div className="space-y-3 mb-6">
-              {market.options && market.options.map(opt => {
+              {market.options?.map(opt => {
                 const prob = calculateProb(opt);
-                const odds = prob > 0 ? (100 / prob).toFixed(2) : "--";
+                // 红色(NO)/绿色(YES)逻辑：如果是两个选项，第一个绿，第二个红。多个选项则默认蓝
+                let colorClass = 'border-slate-800 hover:border-blue-500';
+                if(market.options.length === 2) {
+                  colorClass = opt.id === market.options[0].id 
+                    ? 'border-green-900/50 hover:border-green-500' // A: Green
+                    : 'border-red-900/50 hover:border-red-500';    // B: Red
+                }
+
                 return (
-                  <button
-                    key={opt.id}
-                    disabled={isClosed}
-                    onClick={() => setSelectedOption(opt)}
-                    className={`w-full flex justify-between items-center p-4 rounded-xl border transition-all ${
-                      selectedOption?.id === opt.id 
-                        ? 'bg-blue-600 border-blue-500 shadow-lg shadow-blue-500/20' 
-                        : 'bg-slate-950 border-slate-800 hover:border-slate-600'
-                    } ${isClosed ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    <span className="font-bold">{opt.name}</span>
-                    <div className="text-right">
-                      <div className={`text-sm font-mono ${selectedOption?.id === opt.id ? 'text-white' : 'text-blue-400'}`}>
-                        {odds}x
-                      </div>
+                  <button key={opt.id} disabled={isClosed} onClick={() => setSelectedOption(opt)}
+                    className={`w-full flex justify-between items-center p-4 rounded-xl border transition-all relative overflow-hidden ${colorClass} ${selectedOption?.id === opt.id ? 'bg-slate-800 border-white' : 'bg-slate-950'}`}>
+                    {/* 进度条背景 */}
+                    <div className={`absolute left-0 top-0 bottom-0 opacity-10 ${opt.id === market.options[0].id ? 'bg-green-500' : 'bg-red-500'}`} style={{width: `${prob}%`}}></div>
+                    
+                    <span className="font-bold relative z-10">{opt.name}</span>
+                    <div className="text-right relative z-10">
+                      <div className="text-sm font-mono text-white">{(100 / (prob || 1)).toFixed(2)}x</div>
                       <div className="text-xs opacity-50">{prob}%</div>
                     </div>
                   </button>
@@ -220,70 +225,40 @@ export default function MarketDetail({ params }) {
 
             {selectedOption && (
               <div className="animate-in fade-in slide-in-from-bottom-4">
-                <div className="relative mb-4">
-                  <span className="absolute left-4 top-3.5 text-slate-500">$</span>
-                  <input 
-                    type="number"
-                    value={betAmount}
-                    onChange={e => {
-                      if(Number(e.target.value) <= (profile?.balance || 0)) setBetAmount(e.target.value)
-                    }}
-                    placeholder="0.00"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3 pl-8 pr-4 focus:border-blue-500 outline-none font-mono text-lg"
-                  />
-                  <div className="flex justify-between text-xs text-slate-500 mt-2">
-                    <span>余额: {Number(profile?.balance).toFixed(2)}</span>
-                    <button onClick={() => setBetAmount(profile?.balance)} className="text-blue-400 hover:underline">最大</button>
-                  </div>
-                </div>
-
-                <button 
-                  onClick={() => setShowConfirm(true)}
-                  disabled={!betAmount || Number(betAmount) < 50}
-                  className="w-full bg-white text-black font-bold py-3 rounded-xl hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {Number(betAmount) < 50 && betAmount ? "最低 50 币" : "下注"}
-                </button>
+                <input type="number" value={betAmount} onChange={e => setBetAmount(e.target.value)} placeholder="金额 (Min 50)" className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3 px-4 mb-4 outline-none text-white font-mono"/>
+                <button onClick={() => setShowConfirm(true)} className="w-full bg-white text-black font-bold py-3 rounded-xl hover:bg-slate-200">下注 ${betAmount}</button>
               </div>
+            )}
+            
+            {/* 管理员裁决区域 */}
+            {profile?.is_admin && !isClosed && (
+                <div className="mt-8 pt-6 border-t border-slate-800">
+                    <h4 className="text-xs font-bold text-red-500 mb-2 flex gap-1"><Gavel size={12}/> 管理员强制裁决</h4>
+                    <input value={evidence} onChange={e=>setEvidence(e.target.value)} placeholder="输入裁决证据/理由..." className="w-full text-xs bg-slate-950 border border-slate-700 p-2 rounded mb-2"/>
+                    <div className="grid grid-cols-2 gap-2">
+                        {market.options.map(opt => (
+                            <button key={opt.id} onClick={() => handleResolveMarket(opt.id)} className="text-xs bg-slate-800 hover:bg-green-600 text-white p-2 rounded border border-slate-700">
+                                判 {opt.name} 赢
+                            </button>
+                        ))}
+                    </div>
+                </div>
             )}
           </div>
         </div>
       </main>
 
+      {/* 确认弹窗 (保持原样逻辑，略) */}
       {showConfirm && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl p-6 shadow-2xl">
-            {betSuccess ? (
-              <div className="text-center">
-                <SuccessCheck />
-                <p className="font-bold text-lg mt-2">下注成功！</p>
-              </div>
-            ) : (
+            {betSuccess ? <SuccessCheck /> : (
               <>
-                <h3 className="text-xl font-bold mb-4">确认交易</h3>
-                <div className="bg-slate-950 p-4 rounded-xl mb-4 space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">预测项目</span>
-                    <span className="text-right truncate w-40">{market.question}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">选择方向</span>
-                    <span className="text-white font-bold">{selectedOption.name}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">投入金额</span>
-                    <span className="text-white font-mono">${betAmount}</span>
-                  </div>
-                  <div className="flex justify-between pt-2 border-t border-slate-800">
-                    <span className="text-slate-400">当前赔率</span>
-                    <span className="text-green-400 font-mono">
-                      {(100 / calculateProb(selectedOption)).toFixed(2)}x
-                    </span>
-                  </div>
-                </div>
+                <h3 className="text-xl font-bold mb-4">确认下注</h3>
+                <p className="text-slate-400 text-sm mb-4">方向: <span className="text-white font-bold">{selectedOption.name}</span><br/>金额: <span className="text-white">${betAmount}</span></p>
                 <div className="flex gap-3">
-                  <button onClick={() => setShowConfirm(false)} className="flex-1 py-3 rounded-xl bg-slate-800 hover:bg-slate-700">取消</button>
-                  <button onClick={handlePlaceBet} className="flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 font-bold">确认下注</button>
+                  <button onClick={() => setShowConfirm(false)} className="flex-1 py-3 rounded-xl bg-slate-800">取消</button>
+                  <button onClick={handlePlaceBet} className="flex-1 py-3 rounded-xl bg-blue-600 font-bold">确认</button>
                 </div>
               </>
             )}
