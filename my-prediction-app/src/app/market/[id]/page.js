@@ -1,17 +1,19 @@
+// src/app/market/[id]/page.js
 "use client";
-import { useEffect, useState } from 'react';
+// 1. 引入 use
+import { useEffect, useState, use } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { AlertTriangle, CheckCircle, Lock, Clock } from 'lucide-react';
-// 重点：使用 @ 符号
 import Navbar from '@/components/Navbar';
 import SuccessCheck from '@/components/SuccessCheck';
 
 const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
 export default function MarketDetail({ params }) {
-  // 必须解包 params (Next.js 15+ 规则)
-  const { id } = params;
+  // 2. 关键修改：使用 use(params) 来获取 ID，否则 Next.js 15 会报错或读不到
+  const unwrappedParams = use(params);
+  const id = unwrappedParams.id;
 
   const [market, setMarket] = useState(null);
   const [user, setUser] = useState(null);
@@ -21,9 +23,9 @@ export default function MarketDetail({ params }) {
   const [showConfirm, setShowConfirm] = useState(false);
   const [betSuccess, setBetSuccess] = useState(false);
   const [timeLeft, setTimeLeft] = useState('');
+  const [loading, setLoading] = useState(true); // 新增 loading 状态显示
 
   useEffect(() => {
-    // 获取 ID 后再请求
     if (id) {
       fetchMarketData();
       // 倒计时
@@ -32,19 +34,34 @@ export default function MarketDetail({ params }) {
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [id, market?.end_time]); // 依赖修正
+  }, [id, market?.end_time]);
 
   useEffect(() => {
     getUser();
   }, []);
 
   async function fetchMarketData() {
-    const { data } = await supabase
-      .from('markets')
-      .select(`*, options(*)`)
-      .eq('id', id)
-      .single();
-    setMarket(data);
+    try {
+      // 检查 ID 是否存在
+      if (!id) return;
+
+      const { data, error } = await supabase
+        .from('markets')
+        .select(`*, options(*)`)
+        .eq('id', id)
+        .single();
+      
+      if (error) {
+        console.error("数据库错误:", error);
+        alert("找不到该预测，可能已被删除或权限不足");
+      } else {
+        setMarket(data);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function getUser() {
@@ -73,7 +90,7 @@ export default function MarketDetail({ params }) {
     { time: '06:00', prob: 35 },
     { time: '12:00', prob: 45 },
     { time: '18:00', prob: 42 },
-    { time: 'Current', prob: market && market.options.length > 0 ? calculateProb(market.options[0]) : 50 },
+    { time: 'Current', prob: market && market.options && market.options.length > 0 ? calculateProb(market.options[0]) : 50 },
   ];
 
   function calculateProb(option) {
@@ -87,7 +104,7 @@ export default function MarketDetail({ params }) {
     if (!selectedOption || !betAmount) return;
     
     if (Number(betAmount) < 50) return alert("最低下注 50 币");
-    if (Number(betAmount) > profile.balance) return alert("余额不足");
+    if (Number(betAmount) > (profile?.balance || 0)) return alert("余额不足");
     if (new Date() > new Date(market.end_time)) return alert("已截止");
 
     await supabase.from('profiles').update({ balance: profile.balance - betAmount }).eq('id', user.id);
@@ -115,9 +132,22 @@ export default function MarketDetail({ params }) {
     }, 2000);
   };
 
-  if (!market) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">Loading...</div>;
+  // 优化加载状态显示
+  if (loading) return (
+    <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white">
+      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
+      <p className="text-slate-400">正在加载预测数据...</p>
+      <p className="text-xs text-slate-600 mt-2">如果长时间不动，请检查 Supabase RLS 权限</p>
+    </div>
+  );
 
-  const totalVol = market.options.reduce((acc, o) => acc + Number(o.pool_amount), 0);
+  if (!market) return (
+    <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">
+      未找到该市场数据 (ID: {id})
+    </div>
+  );
+
+  const totalVol = market.options ? market.options.reduce((acc, o) => acc + Number(o.pool_amount), 0) : 0;
   const isClosed = new Date() > new Date(market.end_time) || market.status !== 'OPEN';
 
   return (
@@ -162,7 +192,7 @@ export default function MarketDetail({ params }) {
           <div className="bg-slate-900 border border-white/10 rounded-2xl p-6 sticky top-24 h-fit">
             <h3 className="font-bold mb-4">进行预测</h3>
             <div className="space-y-3 mb-6">
-              {market.options.map(opt => {
+              {market.options && market.options.map(opt => {
                 const prob = calculateProb(opt);
                 const odds = prob > 0 ? (100 / prob).toFixed(2) : "--";
                 return (
