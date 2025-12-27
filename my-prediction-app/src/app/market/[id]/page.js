@@ -1,15 +1,18 @@
-// src/app/market/[id]/page.js
 "use client";
 import { useEffect, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
-import Navbar from '@/components/SuccessCheck';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { AlertTriangle, CheckCircle, Lock } from 'lucide-react';
-import SuccessCheck from '@/components/Navbar';
+import { AlertTriangle, CheckCircle, Lock, Clock } from 'lucide-react';
+// 重点：使用 @ 符号
+import Navbar from '@/components/Navbar';
+import SuccessCheck from '@/components/SuccessCheck';
 
 const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
 export default function MarketDetail({ params }) {
+  // 必须解包 params (Next.js 15+ 规则)
+  const { id } = params;
+
   const [market, setMarket] = useState(null);
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
@@ -20,21 +23,26 @@ export default function MarketDetail({ params }) {
   const [timeLeft, setTimeLeft] = useState('');
 
   useEffect(() => {
-    fetchMarketData();
+    // 获取 ID 后再请求
+    if (id) {
+      fetchMarketData();
+      // 倒计时
+      const timer = setInterval(() => {
+        if(market?.end_time) calculateTimeLeft(market.end_time);
+      }, 1000);
+      return () => clearInterval(timer);
+    }
+  }, [id, market?.end_time]); // 依赖修正
+
+  useEffect(() => {
     getUser();
-    
-    // 倒计时逻辑
-    const timer = setInterval(() => {
-      if(market) calculateTimeLeft(market.end_time);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [market?.id]); // 依赖修正
+  }, []);
 
   async function fetchMarketData() {
     const { data } = await supabase
       .from('markets')
       .select(`*, options(*)`)
-      .eq('id', params.id)
+      .eq('id', id)
       .single();
     setMarket(data);
   }
@@ -60,41 +68,31 @@ export default function MarketDetail({ params }) {
     setTimeLeft(`${days}天 ${hours}时 ${minutes}分`);
   }
 
-  // 模拟图表数据 (真实项目需要后端记录历史)
   const chartData = [
     { time: '00:00', prob: 20 },
     { time: '06:00', prob: 35 },
     { time: '12:00', prob: 45 },
     { time: '18:00', prob: 42 },
-    { time: '现在的', prob: market ? calculateProb(market.options[0]) : 50 },
+    { time: 'Current', prob: market && market.options.length > 0 ? calculateProb(market.options[0]) : 50 },
   ];
 
   function calculateProb(option) {
-    if (!market) return 0;
+    if (!market || !market.options) return 0;
     const total = market.options.reduce((acc, o) => acc + Number(o.pool_amount), 0);
     if (total === 0) return 0;
     return Math.round((option.pool_amount / total) * 100);
   }
 
-  // 核心：下注逻辑
   const handlePlaceBet = async () => {
     if (!selectedOption || !betAmount) return;
     
-    // 1. 检查条件
     if (Number(betAmount) < 50) return alert("最低下注 50 币");
     if (Number(betAmount) > profile.balance) return alert("余额不足");
     if (new Date() > new Date(market.end_time)) return alert("已截止");
 
-    // 2. 数据库事务 (扣钱 + 加池 + 记账)
-    // 注意：在前端直接调 Supabase 做事务不安全，生产环境应用 RPC。这里简化演示。
-    
-    // A. 扣余额
     await supabase.from('profiles').update({ balance: profile.balance - betAmount }).eq('id', user.id);
-    
-    // B. 加池子
     await supabase.from('options').update({ pool_amount: Number(selectedOption.pool_amount) + Number(betAmount) }).eq('id', selectedOption.id);
     
-    // C. 记录下注
     await supabase.from('bets').insert({
       user_id: user.id,
       market_id: market.id,
@@ -102,12 +100,11 @@ export default function MarketDetail({ params }) {
       amount: betAmount
     });
 
-    // D. 记流水
     await supabase.from('transactions').insert({
       user_id: user.id,
       amount: -betAmount,
       type: 'BET',
-      description: `下注: ${market.question.substring(0, 10)}... - ${selectedOption.name}`
+      description: `下注: ${market.question.substring(0, 10)}...`
     });
 
     setBetSuccess(true);
@@ -118,7 +115,7 @@ export default function MarketDetail({ params }) {
     }, 2000);
   };
 
-  if (!market) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">加载中...</div>;
+  if (!market) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">Loading...</div>;
 
   const totalVol = market.options.reduce((acc, o) => acc + Number(o.pool_amount), 0);
   const isClosed = new Date() > new Date(market.end_time) || market.status !== 'OPEN';
@@ -128,7 +125,6 @@ export default function MarketDetail({ params }) {
       <Navbar />
       
       <main className="max-w-4xl mx-auto px-4 py-8">
-        {/* 头部信息 */}
         <div className="mb-8">
           <div className="flex items-center gap-3 mb-4">
             {isClosed ? <span className="bg-red-500/20 text-red-400 px-3 py-1 rounded text-xs font-bold flex items-center gap-1"><Lock size={12}/> 已截止</span> 
@@ -140,7 +136,6 @@ export default function MarketDetail({ params }) {
             {market.description || "暂无详细说明..."}
           </p>
           
-          {/* 裁决后显示证据 */}
           {market.status === 'RESOLVED' && (
             <div className="mt-4 p-4 bg-blue-900/20 border border-blue-500/30 rounded-xl">
               <h3 className="text-blue-400 font-bold mb-1 flex items-center gap-2"><CheckCircle size={16}/> 裁决证据</h3>
@@ -150,9 +145,8 @@ export default function MarketDetail({ params }) {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {/* 左侧：图表 */}
           <div className="md:col-span-2 bg-slate-900/50 rounded-2xl p-6 border border-white/5">
-            <h3 className="text-sm font-bold text-slate-500 mb-4 uppercase">赔率走势 (Option 1)</h3>
+            <h3 className="text-sm font-bold text-slate-500 mb-4 uppercase">赔率走势</h3>
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData}>
@@ -165,17 +159,12 @@ export default function MarketDetail({ params }) {
             </div>
           </div>
 
-          {/* 右侧：交易面板 */}
           <div className="bg-slate-900 border border-white/10 rounded-2xl p-6 sticky top-24 h-fit">
             <h3 className="font-bold mb-4">进行预测</h3>
-            
-            {/* 选项按钮 */}
             <div className="space-y-3 mb-6">
               {market.options.map(opt => {
                 const prob = calculateProb(opt);
-                // 赔率 = 1 / 概率 (简化版)
                 const odds = prob > 0 ? (100 / prob).toFixed(2) : "--";
-
                 return (
                   <button
                     key={opt.id}
@@ -199,7 +188,6 @@ export default function MarketDetail({ params }) {
               })}
             </div>
 
-            {/* 金额输入 */}
             {selectedOption && (
               <div className="animate-in fade-in slide-in-from-bottom-4">
                 <div className="relative mb-4">
@@ -232,7 +220,6 @@ export default function MarketDetail({ params }) {
         </div>
       </main>
 
-      {/* 确认弹窗 */}
       {showConfirm && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl p-6 shadow-2xl">

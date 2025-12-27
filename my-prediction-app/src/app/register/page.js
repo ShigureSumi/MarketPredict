@@ -1,10 +1,10 @@
-// src/app/register/page.js
 "use client";
 import { useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { Eye, EyeOff, Loader2 } from 'lucide-react';
-import SuccessCheck from '../components/SuccessCheck';
 import Link from 'next/link';
+// 下面这一行是重点，用了 @ 符号
+import SuccessCheck from '@/components/SuccessCheck';
 
 const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
@@ -24,7 +24,6 @@ export default function Register() {
     const { error } = await supabase.auth.signUp({
       email,
       password,
-      // Username 在 Supabase 触发器里处理，或者这里放到 metadata
     });
 
     if (error) {
