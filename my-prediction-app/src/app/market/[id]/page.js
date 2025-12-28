@@ -3,7 +3,7 @@
 import { useEffect, useState, use } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { AlertTriangle, CheckCircle, Lock, Clock, Trash2, Gavel, Scale } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Lock, Clock, Trash2, Gavel, Loader2 } from 'lucide-react';
 import Navbar from '@/components/Navbar';
 import SuccessCheck from '@/components/SuccessCheck';
 import { useRouter } from 'next/navigation';
@@ -20,11 +20,15 @@ export default function MarketDetail({ params }) {
   const [profile, setProfile] = useState(null);
   const [selectedOption, setSelectedOption] = useState(null);
   const [betAmount, setBetAmount] = useState('');
+  
+  // 状态控制
   const [showConfirm, setShowConfirm] = useState(false);
   const [betSuccess, setBetSuccess] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false); // <--- 新增：防重复提交锁
+  
   const [timeLeft, setTimeLeft] = useState('');
-  const [userBets, setUserBets] = useState([]); // 用户在该市场的下注记录
-  const [evidence, setEvidence] = useState(''); // 管理员输入的证据
+  const [userBets, setUserBets] = useState([]);
+  const [evidence, setEvidence] = useState('');
 
   useEffect(() => {
     if (id) {
@@ -51,8 +55,6 @@ export default function MarketDetail({ params }) {
       setUser(session.user);
       const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
       setProfile(data);
-      
-      // 获取用户在这个市场的下注历史（用于判断是否已经买过）
       const { data: bets } = await supabase.from('bets').select('*').eq('market_id', id).eq('user_id', session.user.id);
       setUserBets(bets || []);
     }
@@ -79,47 +81,59 @@ export default function MarketDetail({ params }) {
     return Math.round((option.pool_amount / total) * 100);
   }
 
-  // --- 核心逻辑更新：下注 ---
+  // --- 核心修复：增加防重复锁 ---
   const handlePlaceBet = async () => {
+    // 1. 如果正在提交，直接阻断，防止连点
+    if (isSubmitting) return; 
+
     if (!selectedOption || !betAmount) return;
     
-    // 1. 基础检查
     if (Number(betAmount) < 50) return alert("最低下注 50 币");
     if (Number(betAmount) > (profile?.balance || 0)) return alert("余额不足");
     if (new Date() > new Date(market.end_time)) return alert("已截止");
 
-    // 2.【新功能】单边下注检查
-    // 如果用户已经下过注，且这次选的选项跟上次不一样，则报错
     const hasBetOtherSide = userBets.some(bet => bet.option_id !== selectedOption.id);
     if (hasBetOtherSide) {
-      alert("规则限制：你只能押注其中一方！不能两头下注。");
+      alert("规则限制：你只能押注其中一方！");
       setShowConfirm(false);
       return;
     }
 
-    // 3. 执行下注
-    await supabase.from('profiles').update({ balance: profile.balance - betAmount }).eq('id', user.id);
-    await supabase.from('options').update({ pool_amount: Number(selectedOption.pool_amount) + Number(betAmount) }).eq('id', selectedOption.id);
-    await supabase.from('bets').insert({
-      user_id: user.id, market_id: market.id, option_id: selectedOption.id, amount: betAmount
-    });
-    await supabase.from('transactions').insert({
-      user_id: user.id, amount: -betAmount, type: 'BET', description: `下注: ${market.question}`
-    });
+    // 2. 上锁：网络请求开始前，立刻锁死按钮
+    setIsSubmitting(true);
 
-    setBetSuccess(true);
-    setTimeout(() => {
-      setBetSuccess(false);
-      setShowConfirm(false);
-      window.location.reload();
-    }, 2000);
+    try {
+      // 执行下注操作
+      await supabase.from('profiles').update({ balance: profile.balance - betAmount }).eq('id', user.id);
+      await supabase.from('options').update({ pool_amount: Number(selectedOption.pool_amount) + Number(betAmount) }).eq('id', selectedOption.id);
+      await supabase.from('bets').insert({
+        user_id: user.id, market_id: market.id, option_id: selectedOption.id, amount: betAmount
+      });
+      await supabase.from('transactions').insert({
+        user_id: user.id, amount: -betAmount, type: 'BET', description: `下注: ${market.question}`
+      });
+
+      // 成功
+      setBetSuccess(true);
+      setTimeout(() => {
+        setBetSuccess(false);
+        setShowConfirm(false);
+        setIsSubmitting(false); // 解锁（虽然页面会刷新，但保险起见）
+        window.location.reload();
+      }, 2000);
+
+    } catch (error) {
+      // 如果出错，也要解锁，否则用户永远点不了了
+      console.error(error);
+      alert("下注失败，请重试");
+      setIsSubmitting(false);
+    }
   };
 
   // --- 管理员功能 ---
   const handleDeleteMarket = async () => {
-    if(!confirm("确定要删除这个市场吗？此操作无法恢复！")) return;
+    if(!confirm("确定要删除这个市场吗？")) return;
     await supabase.from('markets').delete().eq('id', id);
-    alert("删除成功");
     router.push('/');
   };
 
@@ -127,14 +141,20 @@ export default function MarketDetail({ params }) {
     if(!evidence) return alert("裁决必须提供证据说明！");
     if(!confirm("确定裁决并派奖？")) return;
     
+    // 裁决也加上锁
+    if(isSubmitting) return;
+    setIsSubmitting(true);
+
     const { error } = await supabase.rpc('resolve_market_and_payout', {
       p_market_id: market.id,
       p_winner_option_id: optionId,
       p_evidence: evidence
     });
 
-    if (error) alert("裁决失败: " + error.message);
-    else {
+    if (error) {
+        alert("裁决失败: " + error.message);
+        setIsSubmitting(false);
+    } else {
       alert("裁决完成");
       window.location.reload();
     }
@@ -153,7 +173,6 @@ export default function MarketDetail({ params }) {
       <main className="max-w-4xl mx-auto px-4 py-8">
         {/* 顶部状态栏 */}
         <div className="mb-8 relative">
-          {/* 管理员删除按钮 */}
           {profile?.is_admin && (
             <button onClick={handleDeleteMarket} className="absolute top-0 right-0 p-2 text-red-500 hover:bg-red-900/20 rounded-lg">
               <Trash2 size={20}/>
@@ -169,7 +188,6 @@ export default function MarketDetail({ params }) {
           <h1 className="text-3xl font-black mb-4">{market.question}</h1>
           <p className="text-slate-400 text-sm p-4 bg-slate-900 rounded-xl border border-white/5">{market.description}</p>
           
-          {/* 证据显示 */}
           {market.status === 'RESOLVED' && (
             <div className="mt-4 p-4 bg-blue-900/20 border border-blue-500/30 rounded-xl">
               <h3 className="text-blue-400 font-bold mb-1 flex items-center gap-2"><CheckCircle size={16}/> 裁决证据</h3>
@@ -177,42 +195,36 @@ export default function MarketDetail({ params }) {
             </div>
           )}
 
-          {/* 个人下注提示 */}
           {mySide && (
             <div className="mt-4 flex items-center gap-2 text-yellow-400 bg-yellow-400/10 p-3 rounded-lg border border-yellow-400/20">
               <AlertTriangle size={16}/>
-              <span className="text-sm font-bold">你已下注 [{mySide}] 共 ${myTotalBet}，根据规则你无法押注另一方。</span>
+              <span className="text-sm font-bold">你已下注 [{mySide}] 共 ${myTotalBet}，无法押注另一方。</span>
             </div>
           )}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          {/* 左侧图表 */}
           <div className="md:col-span-2 bg-slate-900/50 rounded-2xl p-6 border border-white/5">
             <h3 className="text-sm font-bold text-slate-500 mb-4 uppercase">概率走势</h3>
             <div className="h-64 w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={chartData}><XAxis dataKey="time"/><YAxis/><Line type="monotone" dataKey="prob" stroke="#3b82f6" dot={false}/></LineChart></ResponsiveContainer></div>
           </div>
 
-          {/* 右侧交易面板 */}
           <div className="bg-slate-900 border border-white/10 rounded-2xl p-6 sticky top-24 h-fit">
             <h3 className="font-bold mb-4">选择方向</h3>
             <div className="space-y-3 mb-6">
               {market.options?.map(opt => {
                 const prob = calculateProb(opt);
-                // 红色(NO)/绿色(YES)逻辑：如果是两个选项，第一个绿，第二个红。多个选项则默认蓝
                 let colorClass = 'border-slate-800 hover:border-blue-500';
                 if(market.options.length === 2) {
                   colorClass = opt.id === market.options[0].id 
-                    ? 'border-green-900/50 hover:border-green-500' // A: Green
-                    : 'border-red-900/50 hover:border-red-500';    // B: Red
+                    ? 'border-green-900/50 hover:border-green-500' 
+                    : 'border-red-900/50 hover:border-red-500';
                 }
 
                 return (
                   <button key={opt.id} disabled={isClosed} onClick={() => setSelectedOption(opt)}
                     className={`w-full flex justify-between items-center p-4 rounded-xl border transition-all relative overflow-hidden ${colorClass} ${selectedOption?.id === opt.id ? 'bg-slate-800 border-white' : 'bg-slate-950'}`}>
-                    {/* 进度条背景 */}
                     <div className={`absolute left-0 top-0 bottom-0 opacity-10 ${opt.id === market.options[0].id ? 'bg-green-500' : 'bg-red-500'}`} style={{width: `${prob}%`}}></div>
-                    
                     <span className="font-bold relative z-10">{opt.name}</span>
                     <div className="text-right relative z-10">
                       <div className="text-sm font-mono text-white">{(100 / (prob || 1)).toFixed(2)}x</div>
@@ -230,15 +242,14 @@ export default function MarketDetail({ params }) {
               </div>
             )}
             
-            {/* 管理员裁决区域 */}
             {profile?.is_admin && !isClosed && (
                 <div className="mt-8 pt-6 border-t border-slate-800">
                     <h4 className="text-xs font-bold text-red-500 mb-2 flex gap-1"><Gavel size={12}/> 管理员强制裁决</h4>
                     <input value={evidence} onChange={e=>setEvidence(e.target.value)} placeholder="输入裁决证据/理由..." className="w-full text-xs bg-slate-950 border border-slate-700 p-2 rounded mb-2"/>
                     <div className="grid grid-cols-2 gap-2">
                         {market.options.map(opt => (
-                            <button key={opt.id} onClick={() => handleResolveMarket(opt.id)} className="text-xs bg-slate-800 hover:bg-green-600 text-white p-2 rounded border border-slate-700">
-                                判 {opt.name} 赢
+                            <button key={opt.id} disabled={isSubmitting} onClick={() => handleResolveMarket(opt.id)} className="text-xs bg-slate-800 hover:bg-green-600 text-white p-2 rounded border border-slate-700 flex justify-center">
+                                {isSubmitting ? <Loader2 className="animate-spin w-4 h-4"/> : `判 ${opt.name} 赢`}
                             </button>
                         ))}
                     </div>
@@ -248,7 +259,7 @@ export default function MarketDetail({ params }) {
         </div>
       </main>
 
-      {/* 确认弹窗 (保持原样逻辑，略) */}
+      {/* 确认弹窗 - 重点看这里的按钮状态 */}
       {showConfirm && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl p-6 shadow-2xl">
@@ -257,8 +268,20 @@ export default function MarketDetail({ params }) {
                 <h3 className="text-xl font-bold mb-4">确认下注</h3>
                 <p className="text-slate-400 text-sm mb-4">方向: <span className="text-white font-bold">{selectedOption.name}</span><br/>金额: <span className="text-white">${betAmount}</span></p>
                 <div className="flex gap-3">
-                  <button onClick={() => setShowConfirm(false)} className="flex-1 py-3 rounded-xl bg-slate-800">取消</button>
-                  <button onClick={handlePlaceBet} className="flex-1 py-3 rounded-xl bg-blue-600 font-bold">确认</button>
+                  <button 
+                    disabled={isSubmitting} // 锁死取消按钮
+                    onClick={() => setShowConfirm(false)} 
+                    className="flex-1 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50"
+                  >
+                    取消
+                  </button>
+                  <button 
+                    onClick={handlePlaceBet} 
+                    disabled={isSubmitting} // 锁死确认按钮
+                    className="flex-1 py-3 rounded-xl bg-blue-600 font-bold hover:bg-blue-500 flex justify-center items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isSubmitting ? <Loader2 className="animate-spin" /> : "确认支付"}
+                  </button>
                 </div>
               </>
             )}
