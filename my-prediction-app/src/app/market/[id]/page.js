@@ -1,10 +1,9 @@
 // src/app/market/[id]/page.js
 "use client";
-// 1. 引入必要的 Hook
 import { useEffect, useState, use } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { AlertTriangle, CheckCircle, Lock, Clock, Trash2, Gavel, Loader2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Lock, Clock, Trash2, Gavel, Loader2, ShieldCheck } from 'lucide-react';
 import Navbar from '@/components/Navbar';
 import SuccessCheck from '@/components/SuccessCheck';
 import { useRouter } from 'next/navigation';
@@ -12,10 +11,8 @@ import { useRouter } from 'next/navigation';
 const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
 
 export default function MarketDetail({ params }) {
-  // 2. Next.js 15 标准写法：使用 use() 解包 params
   const unwrappedParams = use(params);
   const id = unwrappedParams.id;
-  
   const router = useRouter();
 
   const [market, setMarket] = useState(null);
@@ -28,36 +25,40 @@ export default function MarketDetail({ params }) {
   const [showConfirm, setShowConfirm] = useState(false);
   const [betSuccess, setBetSuccess] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  
-  // 3. 新增：isMounted 解决图表报错
   const [isMounted, setIsMounted] = useState(false);
   
   const [timeLeft, setTimeLeft] = useState('');
-  const [userBets, setUserBets] = useState([]);
+  const [userBets, setUserBets] = useState([]); // 存储用户下注记录
   const [evidence, setEvidence] = useState('');
 
-  // 4. 确保只在客户端渲染图表
+  // 这里的 loading 状态很重要，防止数据没加载出来时用户就点击了
+  const [dataLoading, setDataLoading] = useState(true);
+
   useEffect(() => {
     setIsMounted(true);
   }, []);
 
   useEffect(() => {
     if (id) {
-      fetchMarketData();
+      // 同时获取市场数据和用户数据，确保同步
+      Promise.all([fetchMarketData(), getUser()]).then(() => {
+        setDataLoading(false);
+      });
+
       const timer = setInterval(() => {
-        if(market?.end_time) calculateTimeLeft(market.end_time);
+        setMarket(prev => {
+           if(prev?.end_time) calculateTimeLeft(prev.end_time);
+           return prev;
+        });
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [id, market?.end_time]);
-
-  useEffect(() => {
-    getUser();
   }, [id]);
 
   async function fetchMarketData() {
     const { data } = await supabase.from('markets').select(`*, options(*)`).eq('id', id).single();
     setMarket(data);
+    if(data?.end_time) calculateTimeLeft(data.end_time);
   }
 
   async function getUser() {
@@ -66,6 +67,7 @@ export default function MarketDetail({ params }) {
       setUser(session.user);
       const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
       setProfile(data);
+      // 关键：获取该用户在此市场的所有下注
       const { data: bets } = await supabase.from('bets').select('*').eq('market_id', id).eq('user_id', session.user.id);
       setUserBets(bets || []);
     }
@@ -92,22 +94,21 @@ export default function MarketDetail({ params }) {
     return Math.round((option.pool_amount / total) * 100);
   }
 
+  // --- 核心逻辑更新：下注 ---
   const handlePlaceBet = async () => {
     if (isSubmitting) return; 
 
-    if (!selectedOption || !betAmount) return;
-    
-    // 修改为 1 币起投
-    if (Number(betAmount) < 1) return alert("最低下注 1 币");
-    if (Number(betAmount) > (profile?.balance || 0)) return alert("余额不足");
-    if (new Date() > new Date(market.end_time)) return alert("已截止");
-
-    const hasBetOtherSide = userBets.some(bet => bet.option_id !== selectedOption.id);
-    if (hasBetOtherSide) {
-      alert("规则限制：你只能押注其中一方！");
+    // 1. 双重保险：再次检查用户是否已经下过注
+    if (userBets.length > 0) {
+      alert("规则限制：您已经参与过此预测，不可加注或反投！");
       setShowConfirm(false);
       return;
     }
+
+    if (!selectedOption || !betAmount) return;
+    if (Number(betAmount) < 1) return alert("最低下注 1 币");
+    if (Number(betAmount) > (profile?.balance || 0)) return alert("余额不足");
+    if (new Date() > new Date(market.end_time)) return alert("已截止");
 
     setIsSubmitting(true);
 
@@ -164,12 +165,16 @@ export default function MarketDetail({ params }) {
     }
   };
 
-  if (!market) return <div className="min-h-screen bg-slate-950 text-white flex justify-center items-center"><Loader2 className="animate-spin" /></div>;
+  if (!market || dataLoading) return <div className="min-h-screen bg-slate-950 text-white flex justify-center items-center"><Loader2 className="animate-spin" /></div>;
 
   const totalVol = market.options ? market.options.reduce((acc, o) => acc + Number(o.pool_amount), 0) : 0;
   const isClosed = new Date() > new Date(market.end_time) || market.status !== 'OPEN';
+  
+  // 计算用户已下注信息
+  const hasParticipated = userBets.length > 0;
   const myTotalBet = userBets.reduce((acc, b) => acc + Number(b.amount), 0);
-  const mySide = userBets.length > 0 ? market.options.find(o => o.id === userBets[0].option_id)?.name : null;
+  const myBetOptionId = hasParticipated ? userBets[0].option_id : null;
+  const myBetOptionName = hasParticipated ? market.options.find(o => o.id === myBetOptionId)?.name : null;
 
   return (
     <div className="min-h-screen bg-slate-950 text-white">
@@ -198,10 +203,14 @@ export default function MarketDetail({ params }) {
             </div>
           )}
 
-          {mySide && (
-            <div className="mt-4 flex items-center gap-2 text-yellow-400 bg-yellow-400/10 p-3 rounded-lg border border-yellow-400/20">
-              <AlertTriangle size={16}/>
-              <span className="text-sm font-bold">你已下注 [{mySide}] 共 ${myTotalBet}，无法押注另一方。</span>
+          {/* 如果已参与，显示锁定提示条 */}
+          {hasParticipated && (
+            <div className="mt-4 flex items-center gap-2 text-green-400 bg-green-400/10 p-4 rounded-xl border border-green-400/20 animate-in slide-in-from-top-2">
+              <ShieldCheck size={20}/>
+              <div>
+                <p className="text-sm font-bold">已锁定预测</p>
+                <p className="text-xs opacity-80">你已押注 [{myBetOptionName}] ${myTotalBet}。根据规则，不可更改或加注。</p>
+              </div>
             </div>
           )}
         </div>
@@ -210,7 +219,6 @@ export default function MarketDetail({ params }) {
           <div className="md:col-span-2 bg-slate-900/50 rounded-2xl p-6 border border-white/5">
             <h3 className="text-sm font-bold text-slate-500 mb-4 uppercase">概率走势</h3>
             <div className="h-64 w-full">
-              {/* 5. 修复点：只有在客户端(isMounted)才渲染图表 */}
               {isMounted ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={chartData}>
@@ -229,22 +237,50 @@ export default function MarketDetail({ params }) {
           </div>
 
           <div className="bg-slate-900 border border-white/10 rounded-2xl p-6 sticky top-24 h-fit">
-            <h3 className="font-bold mb-4">选择方向</h3>
+            <h3 className="font-bold mb-4">
+              {hasParticipated ? "我的预测" : "选择方向"}
+            </h3>
+
+            {/* 选项列表 */}
             <div className="space-y-3 mb-6">
               {market.options?.map(opt => {
                 const prob = calculateProb(opt);
-                let colorClass = 'border-slate-800 hover:border-blue-500';
-                if(market.options.length === 2) {
-                  colorClass = opt.id === market.options[0].id 
-                    ? 'border-green-900/50 hover:border-green-500' 
-                    : 'border-red-900/50 hover:border-red-500';
+                // 逻辑：
+                // 1. 如果已参与，只有我买的那个亮，其他变暗且不可点
+                // 2. 如果没参与，正常显示，选中变亮
+                
+                const isMyChoice = hasParticipated && opt.id === myBetOptionId;
+                const isDisabled = isClosed || (hasParticipated && !isMyChoice);
+
+                // 颜色计算
+                let borderClass = 'border-slate-800';
+                if (!hasParticipated && !isClosed) borderClass += ' hover:border-blue-500';
+                
+                // 如果是我选的，或者我正在选的
+                const isActive = (hasParticipated && isMyChoice) || (!hasParticipated && selectedOption?.id === opt.id);
+                
+                if (isActive) borderClass = 'bg-slate-800 border-white';
+                else borderClass = 'bg-slate-950 border-slate-800';
+
+                // 特殊颜色条
+                let barColor = 'bg-blue-500';
+                if (market.options.length === 2) {
+                   if(opt.id === market.options[0].id) barColor = 'bg-green-500';
+                   else barColor = 'bg-red-500';
                 }
 
                 return (
-                  <button key={opt.id} disabled={isClosed} onClick={() => setSelectedOption(opt)}
-                    className={`w-full flex justify-between items-center p-4 rounded-xl border transition-all relative overflow-hidden ${colorClass} ${selectedOption?.id === opt.id ? 'bg-slate-800 border-white' : 'bg-slate-950'}`}>
-                    <div className={`absolute left-0 top-0 bottom-0 opacity-10 ${opt.id === market.options[0].id ? 'bg-green-500' : 'bg-red-500'}`} style={{width: `${prob}%`}}></div>
-                    <span className="font-bold relative z-10">{opt.name}</span>
+                  <button 
+                    key={opt.id} 
+                    disabled={isDisabled} 
+                    onClick={() => !hasParticipated && setSelectedOption(opt)}
+                    className={`w-full flex justify-between items-center p-4 rounded-xl border transition-all relative overflow-hidden ${borderClass} ${isDisabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+                  >
+                    <div className={`absolute left-0 top-0 bottom-0 opacity-10 ${barColor}`} style={{width: `${prob}%`}}></div>
+                    <span className="font-bold relative z-10 flex items-center gap-2">
+                      {opt.name}
+                      {isMyChoice && <CheckCircle size={14} className="text-green-400"/>}
+                    </span>
                     <div className="text-right relative z-10">
                       <div className="text-sm font-mono text-white">{(100 / (prob || 1)).toFixed(2)}x</div>
                       <div className="text-xs opacity-50">{prob}%</div>
@@ -254,13 +290,25 @@ export default function MarketDetail({ params }) {
               })}
             </div>
 
-            {selectedOption && (
-              <div className="animate-in fade-in slide-in-from-bottom-4">
-                <input type="number" value={betAmount} onChange={e => setBetAmount(e.target.value)} placeholder="金额 (Min 1)" className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3 px-4 mb-4 outline-none text-white font-mono"/>
-                <button onClick={() => setShowConfirm(true)} className="w-full bg-white text-black font-bold py-3 rounded-xl hover:bg-slate-200">下注 ${betAmount}</button>
+            {/* 下注区域 / 锁定状态区域 */}
+            {hasParticipated ? (
+              // 状态A: 已参与，显示锁定信息
+              <div className="bg-slate-950 rounded-xl p-4 text-center border border-slate-800">
+                <Lock className="mx-auto text-slate-500 mb-2" size={24}/>
+                <p className="text-slate-400 text-xs">下注已锁定</p>
+                <p className="text-white font-mono font-bold text-lg mt-1">${myTotalBet}</p>
               </div>
+            ) : (
+              // 状态B: 未参与，显示下注输入框
+              selectedOption && (
+                <div className="animate-in fade-in slide-in-from-bottom-4">
+                  <input type="number" value={betAmount} onChange={e => setBetAmount(e.target.value)} placeholder="金额 (Min 1)" className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3 px-4 mb-4 outline-none text-white font-mono"/>
+                  <button onClick={() => setShowConfirm(true)} className="w-full bg-white text-black font-bold py-3 rounded-xl hover:bg-slate-200">下注 ${betAmount}</button>
+                </div>
+              )
             )}
             
+            {/* 管理员裁决 */}
             {profile?.is_admin && !isClosed && (
                 <div className="mt-8 pt-6 border-t border-slate-800">
                     <h4 className="text-xs font-bold text-red-500 mb-2 flex gap-1"><Gavel size={12}/> 管理员强制裁决</h4>
