@@ -88,7 +88,7 @@ export default function MarketDetail({ params }) {
 
     if (!selectedOption || !betAmount) return;
     
-    if (Number(betAmount) < 50) return alert("最低下注 50 币");
+    if (Number(betAmount) < 1) return alert("最低下注 1 币");
     if (Number(betAmount) > (profile?.balance || 0)) return alert("余额不足");
     if (new Date() > new Date(market.end_time)) return alert("已截止");
 
@@ -228,7 +228,7 @@ export default function MarketDetail({ params }) {
                     <span className="font-bold relative z-10">{opt.name}</span>
                     <div className="text-right relative z-10">
                       <div className="text-sm font-mono text-white">{(100 / (prob || 1)).toFixed(2)}x</div>
-                      <div className="text-xs opacity-50">{prob}%</div>
+                      <div className="text-xs opacity-50">{probplaceholder}%</div>
                     </div>
                   </button>
                 )
@@ -237,7 +237,7 @@ export default function MarketDetail({ params }) {
 
             {selectedOption && (
               <div className="animate-in fade-in slide-in-from-bottom-4">
-                <input type="number" value={betAmount} onChange={e => setBetAmount(e.target.value)} placeholder="金额 (Min 50)" className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3 px-4 mb-4 outline-none text-white font-mono"/>
+                <input type="number" value={betAmount} onChange={e => setBetAmount(e.target.value)} placeholder="金额 (最小1币)" className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3 px-4 mb-4 outline-none text-white font-mono"/>
                 <button onClick={() => setShowConfirm(true)} className="w-full bg-white text-black font-bold py-3 rounded-xl hover:bg-slate-200">下注 ${betAmount}</button>
               </div>
             )}
