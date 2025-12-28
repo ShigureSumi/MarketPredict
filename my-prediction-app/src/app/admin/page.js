@@ -327,7 +327,36 @@ export default function AdminDashboard() {
               </button>
             </div>
           </div>
-
+           {/* 新增 */}
+          <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl mt-8 lg:col-span-2">
+            <h2 className="text-xl font-bold mb-6 flex items-center gap-2 text-purple-400">
+              <Shield size={20}/> 审核队列 (用户提交)
+            </h2>
+            <div className="space-y-4">
+              {/* 过滤出 PENDING 的市场 */}
+              {pendingMarkets.filter(m => m.status === 'PENDING').map(m => (
+                <div key={m.id} className="flex justify-between items-center bg-slate-950 p-4 rounded-xl border border-slate-800">
+                  <div>
+                    <div className="font-bold">{m.question}</div>
+                    <div className="text-xs text-slate-500">{m.description}</div>
+                    <div className="text-xs text-slate-500 mt-1">选项: {m.options.map(o=>o.name).join(', ')}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={async ()=>{
+                      await supabase.from('markets').update({status: 'OPEN'}).eq('id', m.id);
+                      alert("已批准上线"); fetchPendingMarkets();
+                    }} className="bg-green-600 text-xs px-3 py-2 rounded font-bold hover:bg-green-500">批准</button>
+                    
+                    <button onClick={async ()=>{
+                      await supabase.from('markets').delete().eq('id', m.id);
+                      alert("已驳回"); fetchPendingMarkets();
+                    }} className="bg-red-600 text-xs px-3 py-2 rounded font-bold hover:bg-red-500">驳回</button>
+                  </div>
+                </div>
+              ))}
+              {pendingMarkets.filter(m => m.status === 'PENDING').length === 0 && <p className="text-slate-500 text-sm">暂无待审核申请</p>}
+            </div>
+          </div>
         </div>
       </main>
     </div>
